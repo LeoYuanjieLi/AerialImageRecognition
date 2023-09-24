@@ -1,0 +1,6 @@
+venv
+assets*
+*training*
+*testing*
+.idea/
+.DS_Store
