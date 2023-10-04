@@ -5,7 +5,7 @@ import boto3
 import cv2
 import numpy as np
 from PIL import Image
-
+Image.MAX_IMAGE_PIXELS = 20000000000
 from box import Box
 from helpers import timing
 
@@ -17,6 +17,9 @@ class AerialImage:
         self.region_name = region_name
         self.loaded_aerial_image_array = None
         self.labels: List[Box] = []
+        self.scores: List[float] = []
+        self.x_right_limit = 0
+        self.y_bottom_limit = 0
 
     @timing
     def load_aerial_image(self):
@@ -25,6 +28,8 @@ class AerialImage:
         file_stream = bucket.Object(self.key).get()[["Body"]]
         img = Image.open(file_stream)
         self.loaded_aerial_image_array = np.array(img)
+        self.x_right_limit = self.loaded_aerial_image_arra.shape[0]
+        self.y_bottom_limit = self.loaded_aerial_image_array.shape[1]
 
     @staticmethod
     def write_image_to_s3(img_array, bucket, key, region_name, decode_format=".tif"):
@@ -77,9 +82,56 @@ class AerialImage:
         area_union = area_box1 + area_box2 - area_inter
         return area_inter / area_union
 
-    @timing
     @staticmethod
-    def deduplicate(box, search_range: int):
+    def non_max_suppression(boxes, scores, threshold):
+        """
+        Perform non-maximum suppression on a list of bounding boxes given their scores.
+
+        Args:
+            boxes: List of bounding boxes in the format [x1, y1, x2, y2], where (x1, y1) and (x2, y2) are the
+                   coordinates of the top-left and bottom-right corners.
+            scores: List of confidence scores for each bounding box.
+            threshold: IoU (Intersection over Union) threshold for suppressing overlapping boxes.
+
+        Returns:
+            List of indices to keep after non-maximum suppression.
+        """
+        if len(boxes) == 0:
+            return []
+
+        # Sort boxes by their scores in descending order
+        sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+
+        selected_indices = []
+        while len(sorted_indices) > 0:
+            current_index = sorted_indices[0]
+            selected_indices.append(current_index)
+
+            current_box = boxes[current_index]
+            current_area = (current_box[2] - current_box[0] + 1) * (current_box[3] - current_box[1] + 1)
+
+            for i in range(1, len(sorted_indices)):
+                candidate_index = sorted_indices[i]
+                candidate_box = boxes[candidate_index]
+                intersection_x1 = max(current_box.x1, candidate_box.x1)
+                intersection_y1 = max(current_box.y1, candidate_box.y1)
+                intersection_x2 = min(current_box.x2, candidate_box.x2)
+                intersection_y2 = min(current_box.y2, candidate_box.y2)
+                intersection_area = max(0, intersection_x2 - intersection_x1 + 1) * max(0,
+                                                                                        intersection_y2 - intersection_y1 + 1)
+
+                iou = intersection_area / (current_area + (candidate_box[2] - candidate_box[0] + 1) * (
+                            candidate_box[3] - candidate_box[1] + 1) - intersection_area)
+
+                if iou > threshold:
+                    sorted_indices.pop(i)
+                else:
+                    i += 1
+
+        return selected_indices
+
+    @timing
+    def deduplicate(self, box, search_range: int):
         """
 
         Parameters
@@ -90,4 +142,36 @@ class AerialImage:
         Returns
         -------
         """
+        boxes_within_range = self.search_boxes_from_point(box.xc, box.yc, search_range)
+        if not boxes_within_range:
+            return
 
+        return self.non_max_suppression(boxes_within_range, self.scores, 0.75)
+
+
+
+
+    @timing
+    def search_boxes_from_point(self, x: int, y: int, search_range: int):
+        """
+        Naive method to search for boxes within given range
+        Parameters
+        ----------
+        x
+        y
+        search_range
+
+        Returns
+        -------
+
+        """
+        x_left = max(0, x - search_range)
+        x_right = min(x + search_range, self.x_right_limit)
+        y_top = max(0, y - search_range)
+        y_bottom = min(y + search_range, self.y_bottom_limit)
+        result = []
+        for box in self.labels:
+            if x_left <= box.xc < x_right and y_top <= box.yc < y_bottom:
+                result.append(box)
+
+        return result
